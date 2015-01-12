@@ -21,9 +21,21 @@ var randomItem = function (arr) {
 	return arr[Math.floor(Math.random() * arr.length)];
 };
 
+var not = function (iterator) {
+	return function () {
+		return !iterator.apply(this, arguments);
+	};
+};
+
 var byProperty = function (key, value) {
-	return function (obj) {
-		return obj[key] === value;
+	return function (item) {
+		return item[key] === value;
+	};
+};
+
+var byMatchesAny = function (arr) {
+	return function (item) {
+		return !!(~arr.indexOf(item));
 	};
 };
 
@@ -63,7 +75,8 @@ var instanstiate = function () {
 var preventDefault = function(method) {
 	return function (event) {
 		event.preventDefault();
-		return method();
+		method();
+		return false;
 	}
 };
 
@@ -90,11 +103,7 @@ var Scenario = function (options) {
 	this.name = options.name;
 	this.players = options.minPlayers || 6;
 	this.expansion = options.expansion || 1;
-	this._deck = options.deck;
-};
-
-Scenario.prototype.deck = function (options) {
-	return this._deck(options).map(findByProperty(CARDS, "id"));
+	this.deck = options.deck;
 };
 
 var EXPANSION_NAMES = [
@@ -169,6 +178,36 @@ var SCENARIOS = [
 /**
  * options.cards {Deck}
  * options.players {number}
+ * options.maxGraveyardCards {number}
+ */
+
+function generateGraveyard(options) {
+	options = options || {};
+	var cards = slice(options.cards || CARDS);
+	var graveyard;
+	var graveyardSize = (options.maxGraveyardCards || Number.POSITIVE_INFINITY);
+
+	var damned = cards.find(byProperty("id", "damned"));
+	if (damned && options.players && options.players < damned.minPlayers) remove(cards, damned);
+
+	if (graveyardSize >= cards.length) {
+		graveyard = cards;
+		cards = new Deck();
+	}
+	else {
+		graveyard = new Deck();
+		while (graveyard.length < graveyardSize) {
+			var card = randomItem(cards);
+			graveyard.push(card);
+			remove(cards, card);
+		}
+	}
+	return graveyard;
+}
+
+/**
+ * options.cards {Deck}
+ * options.players {number}
  * options.extras {number}
  * options.ignoreJudge {boolean}
  * options.ignoreMinPlayers {boolean}
@@ -226,18 +265,15 @@ function generateDeck(options) {
 
 	var moneyCards = cards.filter(byProperty("money", true));
 	var minMoneyCards = Math.ceil((deckHasJudge ? 1/3 : 2/3) * players);
-	if (minMoneyCards >= moneyCards.length) pushAll(deck, moneyCards);
-	else {
-		for (var x = 0, xl = minMoneyCards; x < xl; ++x) {
-			addRandomCard(moneyCards);
-		}
+	for (var x = 0, xl = minMoneyCards; x < xl && moneyCards.length; ++x) {
+		addRandomCard(moneyCards);
 	}
 
 	if (deckHasCourtesan) {
 		femaleCards = cards.filter(byProperty("female", true));
 		var numberOfFemaleCardsInDeck = deck.filter(byProperty("female", true)).length;
 		var minFemaleCards = Math.ceil(1/3 * players);
-		for (var x = numberOfFemaleCardsInDeck, xl = minFemaleCards; x < xl; ++x) {
+		for (var x = numberOfFemaleCardsInDeck, xl = minFemaleCards; x < xl && femaleCards.length; ++x) {
 			addRandomCard(femaleCards);
 		}
 	}
@@ -254,23 +290,16 @@ function generateDeck(options) {
 	var graveyard = null;
 	var deckHasNecromancer = !!deck.find(byProperty("name", "Necromancer"));
 	if (deckHasNecromancer) {
-		var graveyardSize = (options.maxGraveyardCards || Number.POSITIVE_INFINITY);
-		if (graveyardSize >= cards.length) {
-			graveyard = cards;
-			cards = new Deck();
-		}
-		else {
-			graveyard = new Deck();
-			while (graveyard.length < graveyardSize) {
-				var card = randomItem(cards);
-				graveyard.push(card);
-				remove(cards, card);
-			}
-		}
+		graveyard = generateGraveyard({
+			cards : cards,
+			players : players,
+			maxGraveyardCards : options.maxGraveyardCards
+		});
 	}
 	
 	return {deck : deck, graveyard : graveyard};
 }
+
 
 var mdg = {
 	vm : {
@@ -318,18 +347,35 @@ var mdg = {
 			};
 		},
 
-		generateDeck : function () {
-			var decks = generateDeck(this.options());
-			this.deck(decks.deck);
-			this.graveyard(decks.graveyard);
-
+		scrollToDecks : function () {
 			setTimeout(function () {
 				var decksElement = document.getElementById("decks");
 				if (decksElement) decksElement.scrollIntoView();
 			}, 100);
-			
-			return false;
+		},
+
+		generateDeck : function () {
+			var decks = generateDeck(this.options());
+			this.deck(decks.deck);
+			this.graveyard(decks.graveyard);
+			this.scrollToDecks();
+		},
+
+		displayScenario : function (scenario) {
+			var options = this.options();
+			var deck = scenario.deck(options).map(findByProperty(this.cards(), "id"));
+			this.deck(deck);
+			if (deck.find(byProperty("name", "Necromancer"))) {
+				this.graveyard(generateGraveyard({
+					cards : options.cards.filter(not(byMatchesAny(deck))),
+					players : options.players,
+					maxGraveyardCards : options.maxGraveyardCards
+				}));
+			} 
+			else this.graveyard(null);
+			this.scrollToDecks();
 		}
+
 	},
 
 	controller : function () {
@@ -411,15 +457,13 @@ var mdg = {
 						]),
 						m(".actions.row", [
 							m(".col-sm-offset-5.col-sm-7", [
-								m("button.btn.btn-primary.generate", {onclick : preventDefault(mdg.vm.generateDeck.bind(mdg.vm))}, "Generate")
+								m("button.btn.btn-primary.btn-lg.generate", {onclick : preventDefault(mdg.vm.generateDeck.bind(mdg.vm))}, "Generate")
 							])
 						]),
-						m(".actions.row", [
+						m(".scenarios.row", [
 							m("label.control-label.col-sm-5", "Scenarios"),
 							m(".col-sm-7", SCENARIOS.map(function (scenario) {
-								return m("button.btn.btn-default.scenario", {"class" : "scenario-" + scenario.id, onclick : preventDefault(function () {
-									mdg.vm.deck(scenario.deck(mdg.vm.options()));
-								})}, scenario.name);
+								return m("button.btn.btn-default.scenario", {"class" : "scenario-" + scenario.id, onclick : preventDefault(mdg.vm.displayScenario.bind(mdg.vm, scenario))}, scenario.name);
 							}))
 						])
 					])
@@ -489,7 +533,7 @@ var mdg = {
 			: ""),
 			m(".page-footer", [
 				m("p", m.trust("Mascarade and Mascarade Expansion are &copy 2014 REPOS PRODUCTION. ALL RIGHTS RESERVED.")),
-				m("p", m.trust("Mascarade Deck Builder is &copy 2015 Gary Court. ALL RIGHS RESERVED. Licensed under the <a href='LICENSE'>BSD License</a>."))
+				m("p", m.trust("Mascarade Deck Builder is &copy 2015 Gary Court. ALL RIGHTS RESERVED. Licensed under the <a href='LICENSE'>BSD License</a>."))
 			])
 		]);
 	}
